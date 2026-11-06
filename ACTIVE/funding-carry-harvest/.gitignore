@@ -1,0 +1,31 @@
+# data — large parquet cache, never commit
+data_cache/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+bash.exe.stackdump
+
+# Generated chart outputs (reproducible from the notebook)
+notebooks/*.png
+
+# LaTeX build artifacts (the PDF itself is committed)
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.synctex.gz

@@ -1,0 +1,482 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.6cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+
+\definecolor{fnblue}{HTML}{1F4FE0}
+\hypersetup{colorlinks=true,linkcolor=fnblue,citecolor=fnblue,urlcolor=fnblue}
+\captionsetup{font=small,labelfont=bf}
+\graphicspath{{figures/}}
+
+\input{numbers.tex}
+
+\title{\textbf{Carry or Dispersion?}\\[0.3em]
+\large A live post-mortem of a beta-hedged funding book on crypto perpetuals}
+\author{Noa Robles Levy\\[0.2em]
+\small Fractal North Research}
+\date{\small Working paper, November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+A cross-sectional funding-carry book on 23 crypto perpetual futures goes long the
+eleven coins with the lowest funding rate, short the eleven with the highest, and
+hedges its net beta to BTC. In backtests it earns a Sharpe ratio of about
+\BnBaseSharpe{} (Binance, \BnStart{} to \BnEnd) and \ByBaseSharpe{} (Bybit,
+\ByStart{} to \ByEnd). Run as a live shadow ledger on Bybit for \LiveDays{} days, it
+lost \LiveLoss\%. I decompose every period's profit and loss into a funding (carry)
+leg and a price leg. The carry leg behaves as designed: it earned \LiveCarry\% live,
+an annualised \LiveCarryAnn\% against \ByBaseCarry\% in the Bybit backtest. The loss
+came entirely from the price leg ($\LivePrice\%$), which is not a hedging failure in
+the usual sense: its live $R^2$ against BTC is \LiveRsqBtc\%. The price leg is a
+cross-sectional dispersion bet. It carries more than 99.9\% of the book's variance in
+backtests, earns most of its historical return in a single 90-day window, and is not
+removed by refinements such as inverse-volatility weighting or a second (ETH) hedge
+factor, whose effect on the Sharpe ratio flips sign between venues. Five months of live
+data cannot formally reject the backtest ($z=\LiveZ$), yet the live loss is worse than
+any 153-day window in the Bybit backtest. The constructive finding is that nearly all
+of the carry comes from the short leg, which points to a per-coin delta-neutral
+construction as the way to isolate it.
+\end{abstract}
+
+\section{Introduction}
+
+Funding on perpetual futures is one of the few cash flows in crypto markets that is
+paid on a fixed schedule regardless of direction. A position that is short when
+funding is positive is paid every eight hours. A natural way to collect it
+systematically is a cross-sectional book: short the coins whose funding is highest,
+long the coins whose funding is lowest, and receive the spread. This is the crypto
+analogue of the carry trades documented across asset classes by
+\citet{koijen2018carry}.
+
+The difficulty is that high funding is not random. It marks coins that leveraged
+traders are crowding into, which are typically the most volatile coins with the
+strongest recent momentum. Shorting them imports a large price exposure. The usual
+answer is a beta hedge to BTC. The book studied here does exactly that, and its
+backtest looked attractive: a Sharpe ratio above one on two venues, with a carry leg
+that on its own is almost riskless.
+
+The live result was a loss of \LiveLoss\% in \LiveDays{} days. This paper asks why.
+The answer is not that the carry failed, nor that the hedge was mis-specified, but
+that the book was never mainly a carry strategy. Its risk, and most of its historical
+return, sit in a residual price leg that is orthogonal to BTC and ETH and driven by
+the dispersion of individual coins around the market.
+
+The contribution is a careful decomposition rather than a new signal. Section~\ref{sec:setup}
+describes the strategy and data. Section~\ref{sec:live} reports the live ledger and
+shows that its losses are unrelated to BTC. Section~\ref{sec:backtest} shows that the
+same structure is present in backtests, and that the price leg's historical return is
+concentrated in a few episodes. Section~\ref{sec:variants} tests whether better weights
+or a second hedge factor fix the problem. Section~\ref{sec:discussion} discusses what
+the evidence does and does not support, and what to build next.
+
+\section{Strategy and data}\label{sec:setup}
+
+\subsection{Funding mechanics}
+
+A perpetual future has no expiry. To keep its price close to spot, longs and shorts
+exchange a funding payment at fixed times (every eight hours on both venues used
+here). With position weight $w_i$ (fraction of equity, positive for long) and funding
+rate $f_{i,t}$, the funding P\&L over period $t$ is $-w_i f_{i,t}$: when funding is
+positive, longs pay and shorts receive.
+
+\subsection{Book construction}
+
+The universe is 23 liquid USDT-margined perpetuals.\footnote{BTC, ETH, BNB, XRP, ADA,
+SOL, DOGE, LINK, DOT, LTC, BCH, FIL, NEAR, AVAX, XLM, AAVE, UNI, TRX, ATOM, ETC, SAND,
+AXS, COMP.} At each rebalance, every seven days, coins are ranked on their latest
+funding rate. With $L_t$ the $N=11$ lowest and $S_t$ the $N=11$ highest,
+\begin{equation}
+  w_{i,t} =
+  \begin{cases}
+    +1/N & i \in L_t,\\
+    -1/N & i \in S_t,\\
+    0 & \text{otherwise,}
+  \end{cases}
+\end{equation}
+so each leg has a gross exposure of one and the book is dollar-neutral before
+hedging. Its funding income is the cross-sectional spread
+$\tfrac{1}{N}\big(\sum_{i\in S_t} f_{i,t} - \sum_{i\in L_t} f_{i,t}\big)$.
+
+The hedge is written generally. Let $F$ be a set of hedge instruments with return
+vector $\mathbf{F}_t$ and trailing covariance matrix $\Sigma_F$, estimated over 90
+eight-hour periods (30 days). The book's exposure to factor $k$ is
+$e_k = \sum_i w_i \operatorname{Cov}(r_i, F_k)$, and the hedge that makes the book
+jointly neutral to all factors is
+\begin{equation}\label{eq:hedge}
+  \mathbf{h} = -\Sigma_F^{-1}\,\mathbf{e}.
+\end{equation}
+With $F=\{\text{BTC}\}$ this reduces to the familiar single-beta hedge
+$h = -\sum_i w_i \beta_i$, which is the live configuration. Using the inverse of
+$\Sigma_F$ rather than separate betas matters when factors are correlated, as BTC and
+ETH are: two separate hedges would remove their common component twice.
+
+\subsection{P\&L decomposition}
+
+Every period's return is split into
+\begin{equation}
+  \pi_t = \underbrace{\textstyle\sum_i -w_i f_{i,t} - \sum_k h_k f_{k,t}}_{\text{carry}}
+        + \underbrace{\textstyle\sum_i w_i r_{i,t} + \sum_k h_k F_{k,t}}_{\text{price}}
+        - \text{cost}_t ,
+\end{equation}
+with costs of 8 basis points on the turnover of both legs and hedge. Ranks, betas and
+volatilities at $t$ use information up to $t-1$; P\&L is realised over $t \to t+1$.
+
+\subsection{Data}
+
+Backtests use two venues. \emph{Binance}: hourly closes and funding for all 23 coins,
+\BnStart{} to \BnEnd{} (\BnPeriods{} eight-hour periods, \BnYears{} years).
+\emph{Bybit}, the venue of the live test: \ByStart{} to \ByEnd{} (\ByPeriods{}
+periods, \ByYears{} years). Every variant starts trading only after a 35-day warm-up,
+so that all variants are evaluated on exactly the same periods.\footnote{An earlier
+version of this comparison let the inverse-volatility variants sit flat during the
+first week of January 2021, an extreme week for altcoins, while the baseline traded
+it. That flattered them by about 0.13 Sharpe. The warm-up removes the asymmetry.}
+
+The live test is a \emph{shadow ledger}: no orders are sent. A scheduled job pulls
+live Bybit prices and the funding events that actually printed, marks the book to
+market, accrues funding, and rebalances every seven days. It ran from \LiveStart{} to
+\LiveEnd{} (\LiveSteps{} steps). Because the data did not exist when the strategy was
+fixed, this is a genuine out-of-sample test of both the price behaviour and the
+assumption that funding accrues as modelled.
+
+\section{The live ledger}\label{sec:live}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{live_ledger.pdf}
+  \caption{Live shadow ledger on Bybit, \LiveStart{} to \LiveEnd. Top: equity of the
+  unlevered book. Bottom: cumulative carry and price contributions. Carry rises
+  steadily; the price leg determines the outcome.}
+  \label{fig:live}
+\end{figure}
+
+Table~\ref{tab:live} and Figure~\ref{fig:live} summarise the live result. Equity fell
+from \$100{,}000 to \$\LiveEquity. The carry leg contributed \LiveCarry\% and the price
+leg \LivePrice\%.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lr}
+    \toprule
+    Days live / steps & \LiveDays{} / \LiveSteps \\
+    Cumulative return & \LiveTotal\% \\
+    \quad of which carry & \LiveCarry\% \\
+    \quad of which price & \LivePrice\% \\
+    Annualised log return & \LiveAnnRet\% \\
+    Annualised volatility & \LiveAnnVol\% \\
+    Sharpe ratio (time-normalised) & \LiveSharpe \\
+    Carry, annualised (Bybit backtest: \ByBaseCarry\%) & \LiveCarryAnn\% \\
+    Std.\ of price P\&L per step & \LiveStepPriceStd\% \\
+    Std.\ of carry P\&L per step & \LiveStepCarryStd\% \\
+    Worst / best price step & \LiveWorstStep\% / \LiveBestStep\% \\
+    \bottomrule
+  \end{tabular}
+  \caption{Live summary. Steps are irregular, from minutes to \LiveLongestGap{} days
+  apart, so annualised figures use time-normalised estimators: return
+  $\sum_j \ell_j / T$ and volatility $\sqrt{\sum_j \ell_j^2 / T}$, with $\ell_j$ the log
+  return of step $j$ and $T$ the elapsed time in years.}
+  \label{tab:live}
+\end{table}
+
+\paragraph{The carry held up.} Live funding income annualised to \LiveCarryAnn\%,
+close to the \ByBaseCarry\% the same configuration earned in the Bybit backtest. The
+modelled cash flow is real and accrues as assumed.\footnote{The live script quotes a
+higher expectation (9.2\%) taken from an earlier research notebook with a different
+sample. Against the like-for-like Bybit backtest the live carry is in line.}
+
+\paragraph{The price leg dominated.} Per step, the price P\&L was \LiveStepRatio{}
+times more volatile than the carry P\&L. There were \LiveBigSteps{} steps with a price
+move above 4\%, the worst at \LiveWorstStep\% and \LiveSecondWorst\%. A book that is
+genuinely market-neutral should not produce such steps.
+
+\paragraph{It was not BTC.} The obvious suspect is a hedge that failed to neutralise
+the market. Regressing each step's price P\&L on the BTC log return over the same
+interval (Figure~\ref{fig:scatter}) gives a slope of \LiveBetaBtc{} and an $R^2$ of
+\LiveRsqBtc\%. Adding ETH raises the $R^2$ to \LiveRsqBoth\%. The worst step, ending
+\LiveWorstDate, coincided with a BTC move of \LiveWorstBtc\%: the beta hedge gained,
+but the shorted high-funding coins rallied much harder. The second worst, ending
+\LiveSecondDate, came with BTC at only \LiveSecondBtc\%. The hedge did its job. What
+remained is the dispersion of individual coins around the market, which a hedge in
+BTC, or in BTC and ETH, cannot touch by construction.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.62\linewidth]{live_btc_scatter.pdf}
+  \caption{Live price P\&L per step against the BTC return over the same interval.
+  The beta hedge works ($\beta\approx\LiveBetaBtc$); the large losses are unrelated
+  to the market.}
+  \label{fig:scatter}
+\end{figure}
+
+\paragraph{Is the loss significant?} Under i.i.d.\ returns the standard error of an
+annualised Sharpe ratio estimated over $T$ years is approximately
+$\sqrt{(1+\mathrm{SR}^2/2)/T}$ \citep{lo2002statistics}. With $T = \LiveDays/365$
+and the Bybit backtest Sharpe of \ByBaseSharpe{} as the null, the standard error is
+\LiveSE{} and the live Sharpe of \LiveSharpe{} gives $z = \LiveZ$. Five months of data
+cannot formally reject the backtest. The empirical distribution tells a less
+comfortable story. Of all 153-day windows in the backtests, \BnWinNegNet\% (Binance)
+and \ByWinNegNet\% (Bybit) lost money, but a loss of 15.3\% or more occurred in only
+\BnWinWorseLive\% of Binance windows and in none of the Bybit windows. Overlapping
+windows contain only a handful of independent observations, which is why the two views
+can coexist: the live result is not statistically decisive, but it lies at or beyond
+the edge of anything the backtest produced. Either the live period was unusually
+unlucky, or the backtest sample overstates the strategy. Section~\ref{sec:backtest}
+gives a reason to suspect the second.
+
+\section{The same structure in backtests}\label{sec:backtest}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{backtest_legs.pdf}
+  \caption{Baseline book, cumulative carry and price contributions in the backtests.
+  The carry is a straight line; the price leg has the shape of a volatile directional
+  strategy whose gains arrive in bursts.}
+  \label{fig:legs}
+\end{figure}
+
+Figure~\ref{fig:legs} shows that the live pattern is not new. In both backtests the
+carry leg is close to a straight line: on its own it has a Sharpe ratio of
+\BnCarrySharpe{} on Binance and \ByCarrySharpe{} on Bybit, with annualised volatility
+below 1\%.\footnote{These carry Sharpe ratios overstate what is attainable. Funding
+rates are persistent, so eight-hour carry returns are strongly autocorrelated and the
+$\sqrt{1095}$ annualisation assumes independence. The qualitative point, that the carry
+is nearly riskless relative to the price leg, survives any reasonable correction.} The
+price leg, by contrast, has an annualised volatility of \BnBasePvol\% (Binance) and
+\ByBasePvol\% (Bybit). The carry leg accounts for \BnCarryShareVar\% and
+\ByCarryShareVar\% of the variance of net returns; the price leg accounts for the rest.
+
+The backtests nonetheless look attractive because the price leg was \emph{profitable}:
+\BnBasePrice\% a year on Binance and \ByBasePrice\% on Bybit, roughly three times the
+carry. Its correlation with BTC is \BnBaseCorr{} and \ByBaseCorr{}, so like the live
+losses these gains are pure dispersion: coins with low funding outperformed coins with
+high funding, after removing the market.
+
+\begin{table}[h]
+  \centering
+  \small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lcc}
+    \toprule
+    & Binance & Bybit \\
+    \midrule
+    Total price P\&L, baseline & \BnTotalPrice\% & \ByTotalPrice\% \\
+    Best 90-day window & \BnBestWinStart{} to \BnBestWinEnd & \ByBestWinStart{} to \ByBestWinEnd \\
+    Price P\&L in that window & \BnBestWinPrice\% & \ByBestWinPrice\% \\
+    Share of total & \BnBestWinShare\% & \ByBestWinShare\% \\
+    Largest contributors in that window & \BnTopOneName{} (\BnTopOneContrib\%), \BnTopTwoName{} (\BnTopTwoContrib\%)
+      & \ByTopOneName{} (\ByTopOneContrib\%), \ByTopTwoName{} (\ByTopTwoContrib\%) \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Concentration of the price leg's backtest return. Contributions are
+  cumulative $\sum_t w_{i,t-1} r_{i,t}$ over the window, in percent of equity.}
+  \label{tab:conc}
+\end{table}
+
+That return is concentrated in time (Table~\ref{tab:conc}). On Bybit, the best 90 days
+(\ByBestWinStart{} to \ByBestWinEnd) delivered \ByBestWinShare\% of the price leg's
+entire profit over almost three years; on Binance, \BnBestWinStart{} to
+\BnBestWinEnd{} delivered \BnBestWinShare\%. Within those windows a handful of coins
+dominate. Outside them the price leg earns far less, with large swings. A backtest
+whose return depends this much on two or three episodes has a sampling error much
+larger than its Sharpe ratio suggests, and a live window that contains no such episode
+should be expected to do much worse than the backtest average.
+
+There is an economic story under which the dispersion return is a premium rather than
+luck. High funding marks crowded leveraged longs, and crowded positions tend to unwind,
+so high-funding coins may underperform on average. The data here are too short and too
+concentrated to distinguish that premium from a few fortunate episodes, and I do not
+claim either.
+
+\section{Do better weights or a second factor help?}\label{sec:variants}
+
+If the problem is residual risk, two refinements suggest themselves. \emph{Inverse
+volatility weighting}: within each leg, $w_i \propto 1/\sigma_i$ with $\sigma_i$ the
+trailing 10-day volatility, normalised to a gross of one per leg. Under equal weights
+the short leg, made of the most volatile coins, dominates the book's risk; inverse
+volatility equalises the per-name risk contributions in the spirit of risk parity
+\citep{maillard2010properties}. \emph{A second hedge factor}: ETH in addition to BTC,
+using equation~\eqref{eq:hedge}. I also test re-hedging every period instead of only
+at rebalance.
+
+\begin{table}[t]
+  \centering
+  \small
+  \setlength{\tabcolsep}{4.5pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{l rrrrr c rrrrr}
+    \toprule
+    & \multicolumn{5}{c}{Binance, \BnStart{} to \BnEnd} && \multicolumn{5}{c}{Bybit, \ByStart{} to \ByEnd} \\
+    \cmidrule{2-6}\cmidrule{8-12}
+    Variant & SR & CAGR & Carry & P.\,vol & MDD && SR & CAGR & Carry & P.\,vol & MDD \\
+    \midrule
+    Baseline: $1/N$, BTC & \BnBaseSharpe & \BnBaseCagr & \BnBaseCarry & \BnBasePvol & \BnBaseMaxDD
+      && \ByBaseSharpe & \ByBaseCagr & \ByBaseCarry & \ByBasePvol & \ByBaseMaxDD \\
+    A: inv.\ vol, BTC & \BnASharpe & \BnACagr & \BnACarry & \BnAPvol & \BnAMaxDD
+      && \ByASharpe & \ByACagr & \ByACarry & \ByAPvol & \ByAMaxDD \\
+    B: $1/N$, BTC+ETH & \BnBSharpe & \BnBCagr & \BnBCarry & \BnBPvol & \BnBMaxDD
+      && \ByBSharpe & \ByBCagr & \ByBCarry & \ByBPvol & \ByBMaxDD \\
+    C: inv.\ vol, BTC+ETH & \BnCSharpe & \BnCCagr & \BnCCarry & \BnCPvol & \BnCMaxDD
+      && \ByCSharpe & \ByCCagr & \ByCCarry & \ByCPvol & \ByCMaxDD \\
+    D: C, re-hedged each period & \BnDSharpe & \BnDCagr & \BnDCarry & \BnDPvol & \BnDMaxDD
+      && \ByDSharpe & \ByDCagr & \ByDCarry & \ByDPvol & \ByDMaxDD \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Weighting and hedge variants. SR: annualised Sharpe ratio. CAGR, carry
+  (annualised), price-leg volatility and maximum drawdown in percent. All variants
+  trade the same periods after a 35-day warm-up, with 8 bps costs on turnover.}
+  \label{tab:variants}
+\end{table}
+
+Table~\ref{tab:variants} and Figure~\ref{fig:variants} give the results. Two patterns
+hold on both venues. Every refinement lowers the price-leg volatility (from
+\BnBasePvol\% to \BnCPvol\% on Binance and from \ByBasePvol\% to \ByCPvol\% on Bybit
+for variant C) and lowers the maximum drawdown. Re-hedging every period never improves
+the Sharpe ratio: the weekly hedge is not stale, and the extra turnover costs more than
+it saves.
+
+The effect on the Sharpe ratio, however, flips sign. On Binance, variant C improves it
+from \BnBaseSharpe{} to \BnCSharpe. On Bybit, the venue of the live test, it falls from
+\ByBaseSharpe{} to \ByCSharpe, and each refinement makes it worse. The reason is
+visible in the price column of Table~\ref{tab:variants}: the refinements reduce the
+book's dispersion exposure, and whether that raises or lowers the Sharpe ratio depends
+on whether the removed exposure happened to be profitable in that sample. They also
+cannot remove much of it. Neither BTC nor ETH spans the idiosyncratic moves of the
+other 21 coins, which is why the price-leg volatility falls by only 13 to 16\%.
+
+With five variants tested on two samples, a Sharpe gain of 0.16 on one venue and a loss
+of 0.34 on the other is not evidence of an improvement in expected return. It is
+evidence of a modest reduction in risk. Selecting the variant that looks best in one
+sample would be a textbook instance of the selection bias that deflated Sharpe ratios
+are designed to catch \citep{bailey2014deflated,harvey2016cross}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{variants_equity.pdf}
+  \caption{Growth of one unit, baseline versus variant C. Variant C is smoother on both
+  venues; it ends higher on Binance and lower on Bybit.}
+  \label{fig:variants}
+\end{figure}
+
+\section{Discussion}\label{sec:discussion}
+
+\subsection{What the evidence supports}
+
+The book should be described as what it is: a cross-sectional dispersion strategy with
+a carry tailwind, not a carry strategy with residual risk. Its backtest Sharpe ratio of
+\ByBaseSharpe{} to \BnBaseSharpe{} is earned by a price leg with 25 to 30\% volatility,
+whose return is concentrated in a few episodes. The live loss is a tail outcome
+relative to the backtest, but with a strategy this volatile five months cannot settle
+whether that reflects bad luck or a backtest that overstates the edge. What the
+evidence does settle is that the strategy should not be run as a low-risk carry
+product.
+
+\subsection{Where the carry actually comes from}
+
+Splitting the carry by leg (baseline) is the most useful number in this study. On
+Binance the short leg earned \BnCarryShort\% a year and the long leg \BnCarryLong\%; on
+Bybit, \ByCarryShort\% and \ByCarryLong\%. The long leg contributes nothing to the carry.
+It is in the book only to offset the short leg's price exposure, and it does so poorly
+because the long and short coins are different coins.
+
+This suggests a different construction. Shorting the high-funding perpetuals and
+holding the \emph{same} coins on spot (the classic cash-and-carry trade) collects the
+short-leg funding while making each position delta-neutral by construction. The price
+leg then reduces to the spot-perpetual basis of the same coin, which is far smaller
+than the dispersion between different coins. This removes the dispersion bet instead
+of trying to hedge it with market factors. It also has costs that the cross-sectional
+book avoids: spot capital and custody, two venues or account types, and basis risk
+around funding resets. I have not tested it here; it is the next experiment.
+
+\subsection{Limitations}
+
+\begin{itemize}
+  \item \emph{Short samples.} 4.3 and 2.8 years of backtest, and five months live. The
+    backtest results are dominated by a few episodes, so their sampling error is larger
+    than the Sharpe ratios suggest.
+  \item \emph{Shadow ledger, not fills.} The live test marks to last prices and charges
+    no transaction costs at all; the backtests charge 8 bps on turnover. Real execution
+    in the smaller coins would add costs and slippage, so the live figures are if
+    anything optimistic.
+  \item \emph{Gaps.} The scheduled job only runs while the host machine is on. There
+    was \LiveGaps{} gap longer than a week (the longest \LiveLongestGap{} days), during
+    which the book was neither marked nor rebalanced. Marking across a gap is still
+    correct; the missed rebalances mean the live book was occasionally staler than
+    designed.
+  \item \emph{Fixed universe.} The 23 coins were chosen with hindsight, from coins that
+    are still liquid today. That is survivorship bias in the backtest, which would
+    flatter it.
+  \item \emph{Multiple testing.} The variants were chosen after seeing the live losses.
+    Section~\ref{sec:variants} reports all of them on both venues for that reason.
+\end{itemize}
+
+\subsection{Ongoing}
+
+Variant C now runs live as a second, parallel shadow ledger from \LiveEnd{}, while the
+baseline continues unchanged as a control. Given Table~\ref{tab:variants}, the prior is
+lower volatility and lower drawdown, not higher return. The quantity to watch is the
+price-leg volatility per step relative to the baseline, which should become measurable
+within weeks, long before return differences mean anything.
+
+\section{Conclusion}
+
+A funding-carry book on crypto perpetuals collects a real, stable, near-riskless cash
+flow and wraps it in a dispersion bet that is about thirty times more volatile. A BTC
+beta hedge neutralises the market well (live $R^2$ of \LiveRsqBtc\%) and is irrelevant
+to the dispersion, which drove a live loss of \LiveLoss\%. Better weights and a second
+factor lower the risk modestly but do not reliably raise the return. To harvest the
+carry, the book has to stop holding different coins on its two sides.
+
+\paragraph{Reproducibility.} Code, the shadow ledger and the script that generates
+every number and figure in this paper (\texttt{paper/make\_assets.py}) are in the
+\texttt{funding-carry-harvest} project of
+\url{https://github.com/noaRoblesLevy/Quant-Research}.
+
+\paragraph{Disclaimer.} This is research, not investment advice. No real capital was
+traded.
+
+\begin{thebibliography}{9}
+\setlength{\itemsep}{2pt}\small
+
+\bibitem[Bailey and L\'opez de Prado(2014)]{bailey2014deflated}
+D.~H. Bailey and M.~L\'opez de Prado.
+\newblock The deflated Sharpe ratio: correcting for selection bias, backtest
+  overfitting, and non-normality.
+\newblock \emph{Journal of Portfolio Management}, 40(5):94--107, 2014.
+
+\bibitem[Harvey et~al.(2016)]{harvey2016cross}
+C.~R. Harvey, Y.~Liu, and H.~Zhu.
+\newblock \ldots and the cross-section of expected returns.
+\newblock \emph{Review of Financial Studies}, 29(1):5--68, 2016.
+
+\bibitem[Koijen et~al.(2018)]{koijen2018carry}
+R.~S.~J. Koijen, T.~J. Moskowitz, L.~H. Pedersen, and E.~B. Vrugt.
+\newblock Carry.
+\newblock \emph{Journal of Financial Economics}, 127(2):197--225, 2018.
+
+\bibitem[Lo(2002)]{lo2002statistics}
+A.~W. Lo.
+\newblock The statistics of Sharpe ratios.
+\newblock \emph{Financial Analysts Journal}, 58(4):36--52, 2002.
+
+\bibitem[Maillard et~al.(2010)]{maillard2010properties}
+S.~Maillard, T.~Roncalli, and J.~Te\"iletche.
+\newblock The properties of equally weighted risk contribution portfolios.
+\newblock \emph{Journal of Portfolio Management}, 36(4):60--70, 2010.
+
+\end{thebibliography}
+
+\end{document}

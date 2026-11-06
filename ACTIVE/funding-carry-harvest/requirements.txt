@@ -1,0 +1,12 @@
+# Core (required)
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0        # parquet cache
+matplotlib>=3.7      # plotting
+
+# MT5 data feed (Windows only; needed for real data, not for the self-test)
+MetaTrader5>=5.0.45
+
+# Optional
+# dukascopy-python>=4.0   # deep historical FX/CFD tick data (alternative feed)
+# pytest>=7.0             # if you prefer pytest over the standalone self-test
