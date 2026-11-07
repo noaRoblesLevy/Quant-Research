@@ -1,0 +1,6 @@
+# downloaded market data, never commit
+data_cache/
+
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
