@@ -1,0 +1,19 @@
+{
+  "feasible": [],
+  "maximin_cagr": {},
+  "candidate": null,
+  "H1_recent_winner_supported": false,
+  "calibration": {
+    "EQ": 0.07,
+    "ETF_TF": 0.07,
+    "FX_CARRY": 0.04,
+    "FX_TF": 0.04,
+    "CRYPTO_TF": 0.19,
+    "CRYPTO_CC": 0.25,
+    "EQRISK": 0.07,
+    "WF_SHARPE": 0.09,
+    "WF_TOP2": 0.1,
+    "EX_EQ": 0.07
+  },
+  "runtime_s": 28
+}
