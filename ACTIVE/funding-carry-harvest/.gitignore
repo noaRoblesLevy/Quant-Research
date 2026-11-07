@@ -24,6 +24,10 @@ bash.exe.stackdump
 # Generated chart outputs (reproducible from the notebook)
 notebooks/*.png
 
+# The repository root ignores every directory named "data/" (downloaded trade data).
+# That also matched the data-loader package; re-include it (it holds only code).
+!quantresearch/data/
+
 # LaTeX build artifacts (the PDF itself is committed)
 paper/*.aux
 paper/*.log
