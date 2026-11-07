@@ -2,9 +2,11 @@
 Live forward-test ("shadow ledger") for the locked funding-carry strategy on Bybit.
 
 No API key, no real orders: it tracks a simulated book on LIVE Bybit data. Each run
-it pulls fresh prices + the funding events that actually printed since the last run,
-marks the held book to market, accrues the real funding income, rebalances every 7
-days, and appends to a ledger. Because data after you start didn't exist at backtest
+replays every 8h funding-grid step (00/08/16 UTC) since the previous run from Bybit's
+public history: it marks the held book to market, accrues the funding that actually
+printed, rebalances exactly every 7 days using only data known at the time, and
+appends one ledger row per step. Missed runs (PC off) are caught up on the next run,
+so gaps do not change the result. Because data after you start didn't exist at backtest
 time, this is a genuine out-of-sample test — and it confirms live funding accrues as
 the model assumes (the one thing a backtest can't verify).
 
@@ -60,23 +62,26 @@ LEDGER = ROOT / "data_cache" / "forward_ledger.csv"
 DASH_PNG = ROOT / "data_cache" / "forward_progress.png"
 
 # backtest expectation to compare against (Bybit, 7-day hold, recent regime)
-EXPECT = dict(sharpe=1.34, carry_ann=0.092, net_ann=0.30)
+EXPECT_BASE = dict(sharpe=1.34, carry_ann=0.092, net_ann=0.30)
+EXPECT = EXPECT_BASE
 # variant c: scripts/eval_hedge_variants.py --venue bybit (Aug 2022..May 2025, same venue
 # as this live test). Same harness: baseline Sharpe 1.24, c 0.90. On Binance 2021-25 c
 # beats baseline (1.48 vs 1.32), so c is a risk reduction, not a reliable return boost.
 EXPECT_C = dict(sharpe=0.90, carry_ann=0.060, net_ann=0.18)
 
 
-def set_variant(v: str):
-    """Point state/ledger/dashboard files and expectations at the chosen variant."""
+def set_variant(v: str, state_dir: Path | None = None):
+    """Point state/ledger/dashboard files and expectations at the chosen variant.
+
+    state_dir overrides data_cache/ (used to test on copies of the real ledgers)."""
     global VARIANT, STATE, LEDGER, DASH_PNG, EXPECT
     VARIANT = v
     sfx = _SUFFIX[v]
-    STATE = ROOT / "data_cache" / f"forward_state{sfx}.json"
-    LEDGER = ROOT / "data_cache" / f"forward_ledger{sfx}.csv"
-    DASH_PNG = ROOT / "data_cache" / f"forward_progress{sfx}.png"
-    if v == "c":
-        EXPECT = EXPECT_C
+    d = Path(state_dir) if state_dir else ROOT / "data_cache"
+    STATE = d / f"forward_state{sfx}.json"
+    LEDGER = d / f"forward_ledger{sfx}.csv"
+    DASH_PNG = d / f"forward_progress{sfx}.png"
+    EXPECT = EXPECT_C if v == "c" else EXPECT_BASE
 
 
 # ----------------------------------------------------------------- live data
@@ -97,6 +102,83 @@ def fetch_funding_since(symbol: str, since_ms: int) -> pd.Series:
     return pd.Series(rows).sort_index()
 
 
+def _ms(t: pd.Timestamp) -> int:
+    return int(t.value // 1_000_000)
+
+
+def fetch_closes_range(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+    """Hourly closes with OPEN time in [start, end], paging backward (any gap length)."""
+    rows, cursor, start_ms = {}, _ms(end), _ms(start)
+    while cursor >= start_ms:
+        url = f"{BASE}/kline?category=linear&symbol={symbol}&interval=60&end={cursor}&limit=1000"
+        lst = _get(url)["result"]["list"]
+        if not lst:
+            break
+        for x in lst:
+            t = int(x[0])
+            if start_ms <= t <= _ms(end):
+                rows[t] = float(x[4])
+        oldest = int(lst[-1][0])
+        if oldest <= start_ms or oldest >= cursor:
+            break
+        cursor = oldest - 1
+        time.sleep(0.12)
+    s = pd.Series(rows, dtype=float)
+    s.index = pd.to_datetime(s.index, unit="ms")
+    return s.sort_index()
+
+
+def fetch_funding_range(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+    """Funding events with timestamp in (start, end], paging backward."""
+    rows, cursor, start_ms, end_ms = {}, _ms(end), _ms(start), _ms(end)
+    while True:
+        url = f"{BASE}/funding/history?category=linear&symbol={symbol}&endTime={cursor}&limit=200"
+        lst = _get(url)["result"]["list"]
+        if not lst:
+            break
+        for x in lst:
+            t = int(x["fundingRateTimestamp"])
+            if start_ms < t <= end_ms:
+                rows[t] = float(x["fundingRate"])
+        oldest = int(lst[-1]["fundingRateTimestamp"])
+        if oldest <= start_ms or len(lst) < 200 or oldest >= cursor:
+            break
+        cursor = oldest - 1
+        time.sleep(0.12)
+    s = pd.Series(rows, dtype=float)
+    s.index = pd.to_datetime(s.index, unit="ms")
+    return s.sort_index()
+
+
+def weights_at(t: pd.Timestamp, hourly: pd.DataFrame, funding: dict) -> dict:
+    """Weights as the live job would have built them at grid time t, using only data
+    known at t: hourly bars that had CLOSED by t (open time <= t-1h, last 1000, as live)
+    and each coin's latest funding rate printed at or before t."""
+    past = hourly[hourly.index <= t - pd.Timedelta(hours=1)].tail(1000)
+    px = past.resample("8h").last().dropna(how="all")
+    ret = np.log(px).diff()
+    fr = pd.Series({s: f[f.index <= t].iloc[-1] for s, f in funding.items()
+                    if len(f[f.index <= t])}).dropna()
+    return weights_from(fr, ret)
+
+
+def grid_after(after: pd.Timestamp, upto: pd.Timestamp) -> list:
+    """8h funding grid (00:00/08:00/16:00 UTC) strictly after `after`, up to `upto`."""
+    t = after.ceil("8h")
+    if t == after:
+        t += pd.Timedelta(hours=8)
+    out = []
+    while t <= upto:
+        out.append(t)
+        t += pd.Timedelta(hours=8)
+    return out
+
+
+def _utc_naive(x) -> pd.Timestamp:
+    t = pd.Timestamp(x)
+    return t.tz_convert("UTC").tz_localize(None) if t.tzinfo else t
+
+
 # ----------------------------------------------------------------- book construction
 def target_weights() -> dict:
     """Rank by latest funding; long 11 lowest, short 11 highest; + BTC beta hedge."""
@@ -113,11 +195,23 @@ def target_weights() -> dict:
         time.sleep(0.05)
     fr = pd.Series(fund).dropna()
 
-    if VARIANT == "c":
-        w = _weights_variant_c(fr, ret)
-        last_px = {s: float(px[s].iloc[-1]) for s in UNIVERSE}
-        return w, last_px
+    w = weights_from(fr, ret)
+    last_px = {s: float(px[s].iloc[-1]) for s in UNIVERSE}
+    return w, last_px
 
+
+def weights_from(fr: pd.Series, ret: pd.DataFrame) -> dict:
+    """Target weights from a funding snapshot and 8h log returns, for the active variant.
+
+    Shared by the live path (target_weights) and the catch-up replay (weights_at), so
+    both build the book with exactly the same code."""
+    if VARIANT == "c":
+        return _weights_variant_c(fr, ret)
+    return _weights_baseline(fr, ret)
+
+
+def _weights_baseline(fr: pd.Series, ret: pd.DataFrame) -> dict:
+    """Locked baseline: 1/N per leg + single BTC beta hedge."""
     w = {s: 0.0 for s in UNIVERSE}
     for s in fr.nsmallest(N_EACH).index:
         w[s] = 1.0 / N_EACH
@@ -133,9 +227,7 @@ def target_weights() -> dict:
             cov = ret[s].tail(BETA_WIN).cov(btc.tail(BETA_WIN))
             net_beta += w[s] * (cov / var if var > 0 else 1.0)
     w[HEDGE] = w.get(HEDGE, 0.0) - net_beta     # add hedge to BTC leg
-
-    last_px = {s: float(px[s].iloc[-1]) for s in UNIVERSE}
-    return w, last_px
+    return w
 
 
 def _weights_variant_c(fr: pd.Series, ret: pd.DataFrame) -> dict:
@@ -205,59 +297,84 @@ def do_init():
     print(f"  equity = $100,000 (unlevered book)")
 
 
-def do_step():
+SETTLE = pd.Timedelta(minutes=10)    # wait this long after a grid time before using it
+
+
+def do_step(now: pd.Timestamp | None = None):
+    """Advance the ledger to the latest 8h grid time, replaying every missed step.
+
+    The ledger is a shadow book (no orders), so it does not need to run on time: each
+    8h step since the last run is reconstructed from Bybit's public history. Per grid
+    time t it marks the held book to the close of the hour ending at t, accrues the
+    funding events printed in (previous t, t], and rebalances exactly HOLD_DAYS after
+    the previous rebalance using only data known at t. Gaps (PC off) therefore no
+    longer change the result. Since 2026-11-07; earlier ledger rows were recorded at
+    irregular run times and are kept as they were.
+    """
     st = load_state()
     if st is None:
         print("No state. Run --init first."); return
-    last_run_ms = int(pd.Timestamp(st["last_run"]).timestamp() * 1000)
+    now = _utc_naive(now if now is not None else pd.Timestamp.utcnow())
+    last = _utc_naive(st["last_run"])
+    grid = grid_after(last, now - SETTLE)
+    if not grid:
+        print(f"[{now.isoformat()}] up to date (last step {last.isoformat()}, next grid "
+              f"{grid_after(last, last + pd.Timedelta(hours=8))[0].isoformat()})")
+        return
 
-    # current prices for held coins
-    held = {s: x for s, x in st["positions"].items() if x != 0}
-    cur_px = {}
-    for s in held:
-        cur_px[s] = float(fetch_klines(s, 5).iloc[-1]); time.sleep(0.05)
+    # rebalance schedule: first grid time >= last rebalance + HOLD_DAYS, then every HOLD_DAYS
+    hold = pd.Timedelta(days=HOLD_DAYS)
+    nxt, rebs = _utc_naive(st["last_rebalance"]) + hold, set()
+    for t in grid:
+        if t >= nxt:
+            rebs.add(t); nxt = t + hold
 
-    # mark-to-market price P&L since last run
-    price_ret = 0.0
-    for s, w in held.items():
-        p0 = st["last_price"].get(s); p1 = cur_px[s]
-        if p0:
-            price_ret += w * (p1 / p0 - 1.0)
+    # fetch everything first, so a network failure never leaves a half-written ledger
+    first_needed = min([last] + [t - pd.Timedelta(hours=1000) for t in rebs])
+    hourly = pd.DataFrame({s: fetch_closes_range(s, first_needed - pd.Timedelta(hours=2),
+                                                 grid[-1] - pd.Timedelta(hours=1))
+                           for s in UNIVERSE})
+    funding = {s: fetch_funding_range(s, min(last, first_needed) - pd.Timedelta(days=2), grid[-1])
+               for s in UNIVERSE}
 
-    # funding income from events printed since last run:  -w * sum(rates)
-    carry_ret = 0.0
-    for s, w in held.items():
-        fs = fetch_funding_since(s, last_run_ms); time.sleep(0.05)
-        if len(fs):
-            carry_ret += -w * fs.sum()
+    def close_at(s, t):
+        """Close of the hourly bar ending at t (open time t-1h); NaN if missing."""
+        v = hourly[s].get(t - pd.Timedelta(hours=1), np.nan) if s in hourly else np.nan
+        return float(v)
 
-    eq0 = st["equity"]
-    st["equity"] = eq0 * (1 + price_ret + carry_ret)
-    st["cum_carry"] += carry_ret
-    st["cum_price"] += price_ret
+    prev = last
+    for t in grid:
+        held = {s: x for s, x in st["positions"].items() if x != 0}
+        price_ret = carry_ret = 0.0
+        for s, w in held.items():
+            p0, p1 = st["last_price"].get(s), close_at(s, t)
+            if p0 and np.isfinite(p1):
+                price_ret += w * (p1 / p0 - 1.0)
+                st["last_price"][s] = p1
+            f = funding.get(s)
+            if f is not None and len(f):
+                carry_ret += -w * float(f[(f.index > prev) & (f.index <= t)].sum())
 
-    # rebalance if 7 days elapsed
-    now = pd.Timestamp.utcnow()
-    rebalanced = False
-    if (now - pd.Timestamp(st["last_rebalance"])).total_seconds() >= HOLD_DAYS * 86400:
-        w_new, last_px = target_weights()
-        st["positions"] = w_new
-        st["last_price"] = last_px
-        st["last_rebalance"] = now.isoformat()
-        rebalanced = True
-    else:
-        for s in held:
-            st["last_price"][s] = cur_px[s]    # mark forward
+        st["equity"] *= (1 + price_ret + carry_ret)
+        st["cum_carry"] += carry_ret
+        st["cum_price"] += price_ret
 
-    st["last_run"] = now.isoformat()
-    save_state(st)
-    append_ledger(dict(time=now.isoformat(), equity=round(st["equity"], 2),
-                       step_price=round(price_ret, 6), step_carry=round(carry_ret, 6),
-                       cum_carry=round(st["cum_carry"], 6), cum_price=round(st["cum_price"], 6),
-                       rebalanced=rebalanced))
-    print(f"[{now.isoformat()}] equity ${st['equity']:,.2f}  "
-          f"(this step: price {price_ret*100:+.3f}%  carry {carry_ret*100:+.3f}%)"
-          f"{'  [REBALANCED]' if rebalanced else ''}")
+        rebalanced = t in rebs
+        if rebalanced:
+            st["positions"] = weights_at(t, hourly, funding)
+            st["last_price"] = {s: close_at(s, t) for s in UNIVERSE if np.isfinite(close_at(s, t))}
+            st["last_rebalance"] = t.tz_localize("UTC").isoformat()
+
+        st["last_run"] = t.tz_localize("UTC").isoformat()
+        save_state(st)
+        append_ledger(dict(time=st["last_run"], equity=round(st["equity"], 2),
+                           step_price=round(price_ret, 6), step_carry=round(carry_ret, 6),
+                           cum_carry=round(st["cum_carry"], 6), cum_price=round(st["cum_price"], 6),
+                           rebalanced=rebalanced))
+        print(f"[{st['last_run']}] equity ${st['equity']:,.2f}  "
+              f"(this step: price {price_ret*100:+.3f}%  carry {carry_ret*100:+.3f}%)"
+              f"{'  [REBALANCED]' if rebalanced else ''}")
+        prev = t
 
 
 def do_report():
@@ -331,8 +448,10 @@ if __name__ == "__main__":
     ap.add_argument("--dashboard", action="store_true", help="report + refresh progress PNG")
     ap.add_argument("--variant", choices=sorted(_SUFFIX), default="baseline",
                     help="which parallel shadow ledger to drive (default: baseline)")
+    ap.add_argument("--state-dir", default=None,
+                    help="read/write state and ledger here instead of data_cache/ (testing)")
     a = ap.parse_args()
-    set_variant(a.variant)
+    set_variant(a.variant, a.state_dir)
     if a.init:        do_init()
     elif a.step:      do_step()
     elif a.report:    do_report()

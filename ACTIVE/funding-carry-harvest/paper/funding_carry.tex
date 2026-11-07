@@ -24,7 +24,7 @@
 \large A live post-mortem of a beta-hedged funding book on crypto perpetuals}
 \author{Noa Robles Levy\\[0.2em]
 \small Fractal North Research}
-\date{\small Working paper, November 2026}
+\date{\small Working paper, November 2026. Revised 7 November 2026.}
 
 \begin{document}
 \maketitle
@@ -36,19 +36,22 @@ eleven coins with the lowest funding rate, short the eleven with the highest, an
 hedges its net beta to BTC. In backtests it earns a Sharpe ratio of about
 \BnBaseSharpe{} (Binance, \BnStart{} to \BnEnd) and \ByBaseSharpe{} (Bybit,
 \ByStart{} to \ByEnd). Run as a live shadow ledger on Bybit for \LiveDays{} days, it
-lost \LiveLoss\%. I decompose every period's profit and loss into a funding (carry)
-leg and a price leg. The carry leg behaves as designed: it earned \LiveCarry\% live,
-an annualised \LiveCarryAnn\% against \ByBaseCarry\% in the Bybit backtest. The loss
-came entirely from the price leg ($\LivePrice\%$), which is not a hedging failure in
-the usual sense: its live $R^2$ against BTC is \LiveRsqBtc\%. The price leg is a
-cross-sectional dispersion bet. It carries more than 99.9\% of the book's variance in
-backtests, earns most of its historical return in a single 90-day window, and is not
-removed by refinements such as inverse-volatility weighting or a second (ETH) hedge
-factor, whose effect on the Sharpe ratio flips sign between venues. Five months of live
-data cannot formally reject the backtest ($z=\LiveZ$), yet the live loss is worse than
-any 153-day window in the Bybit backtest. The constructive finding is that nearly all
-of the carry comes from the short leg, which points to a per-coin delta-neutral
-construction as the way to isolate it.
+lost \LiveLoss\%. That ledger only advanced while its host machine was on, so it
+rebalanced irregularly; replaying the same period on the intended schedule (every
+seven days) gives a loss of \CleanLoss\% instead. Rebalance timing alone moved a
+five-month result by \CleanGap{} points, because it changed which coins were held. I
+decompose every period's profit and loss into a funding (carry) leg and a price leg.
+In both versions the carry was positive and steady but modest (\CleanCarryAnn\% a
+year on the clean schedule, against \ByBaseCarry\% in the Bybit backtest), and the
+result was decided by the price leg, which is not a hedging failure in the usual sense:
+its $R^2$ against BTC is \LiveRsqBtc\% in both. The price leg is a cross-sectional
+dispersion bet. It carries more than 99.9\% of the book's variance in backtests, earns
+most of its historical return in a single 90-day window, and is not removed by
+refinements such as inverse-volatility weighting or a second (ETH) hedge factor, whose
+effect on the Sharpe ratio flips sign between venues. On the clean schedule the live
+result is unremarkable relative to the backtest ($z=\CleanZ$). The constructive finding
+is that nearly all of the carry comes from the short leg, which points to a per-coin
+delta-neutral construction as the way to isolate it.
 \end{abstract}
 
 \section{Introduction}
@@ -68,9 +71,11 @@ answer is a beta hedge to BTC. The book studied here does exactly that, and its
 backtest looked attractive: a Sharpe ratio above one on two venues, with a carry leg
 that on its own is almost riskless.
 
-The live result was a loss of \LiveLoss\% in \LiveDays{} days. This paper asks why.
-The answer is not that the carry failed, nor that the hedge was mis-specified, but
-that the book was never mainly a carry strategy. Its risk, and most of its historical
+The recorded live result was a loss of \LiveLoss\% in \LiveDays{} days; on the
+schedule the strategy actually specifies, the same period gives \CleanTotal\%. This
+paper asks why the book lost money, and why the rebalance schedule mattered so much.
+The answer to both is not that the carry failed, nor that the hedge was mis-specified,
+but that the book was never mainly a carry strategy. Its risk, and most of its historical
 return, sit in a residual price leg that is orthogonal to BTC and ETH and driven by
 the dispersion of individual coins around the market.
 
@@ -150,7 +155,11 @@ live Bybit prices and the funding events that actually printed, marks the book t
 market, accrues funding, and rebalances every seven days. It ran from \LiveStart{} to
 \LiveEnd{} (\LiveSteps{} steps). Because the data did not exist when the strategy was
 fixed, this is a genuine out-of-sample test of both the price behaviour and the
-assumption that funding accrues as modelled.
+assumption that funding accrues as modelled. One implementation detail turned out to
+matter: the job only ran while its host machine was on, so steps were irregular (from
+minutes to \LiveLongestGap{} days apart) and rebalances happened whenever the job next
+ran after seven days had passed. Section~\ref{sec:schedule} quantifies the effect by
+replaying the same period on the intended schedule.
 
 \section{The live ledger}\label{sec:live}
 
@@ -192,11 +201,16 @@ leg \LivePrice\%.
   \label{tab:live}
 \end{table}
 
-\paragraph{The carry held up.} Live funding income annualised to \LiveCarryAnn\%,
-close to the \ByBaseCarry\% the same configuration earned in the Bybit backtest. The
-modelled cash flow is real and accrues as assumed.\footnote{The live script quotes a
-higher expectation (9.2\%) taken from an earlier research notebook with a different
-sample. Against the like-for-like Bybit backtest the live carry is in line.}
+\paragraph{The carry was positive, but modest.} Recorded funding income annualised to
+\LiveCarryAnn\%, close to the \ByBaseCarry\% the same configuration earned in the Bybit
+backtest. That comparison flatters the carry: on the clean schedule of
+Section~\ref{sec:schedule} it annualises to \CleanCarryAnn\%, about half the backtest
+rate. The two ledgers earn nearly the same carry in every month except October
+(\OctCarryReal\% recorded against \OctCarryClean\% clean), when the recorded book
+happened to hold coins with unusually high funding. The cash flow is real and accrues
+as modelled, but it is smaller than the backtest suggested.\footnote{The live script
+quotes a higher expectation (9.2\%) taken from an earlier research notebook with a
+different sample.}
 
 \paragraph{The price leg dominated.} Per step, the price P\&L was \LiveStepRatio{}
 times more volatile than the carry P\&L. There were \LiveBigSteps{} steps with a price
@@ -222,20 +236,75 @@ BTC, or in BTC and ETH, cannot touch by construction.
   \label{fig:scatter}
 \end{figure}
 
+\subsection{How much did the schedule matter?}\label{sec:schedule}
+
+The live ledger rebalanced \RealRebs{} times at irregular moments; the strategy
+specifies a rebalance every seven days. Because the ledger is a shadow book, the
+intended schedule can be reconstructed exactly from Bybit's public history: every
+eight-hour funding time is marked to the close of the hour ending then, funding printed
+in the interval is accrued, and the book is rebalanced every seven days using only
+data available at that moment.\footnote{The replay uses the same weighting code as the
+live job and was tested for two properties: running it in one pass or in several passes
+with gaps gives identical ledgers, and the weights at a rebalance are identical whether
+or not data after that moment is supplied.} Since 7 November 2026 the live job itself
+works this way, so missed runs are caught up and no longer change the result.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lrr}
+    \toprule
+    & Recorded ledger & Clean schedule \\
+    \midrule
+    Rebalances & \RealRebs & \CleanRebs \\
+    Cumulative return & \LiveTotal\% & \CleanTotal\% \\
+    \quad of which carry & \LiveCarry\% & \CleanCarry\% \\
+    \quad of which price & \LivePrice\% & \CleanPrice\% \\
+    Carry, annualised & \LiveCarryAnn\% & \CleanCarryAnn\% \\
+    Sharpe ratio & \LiveSharpe & \CleanSharpe \\
+    Price P\&L $R^2$ against BTC & \LiveRsqBtc\% & \CleanRsqBtc\% \\
+    \bottomrule
+  \end{tabular}
+  \caption{Recorded live ledger against the same period replayed on the intended
+  schedule (clean replay to \CleanEnd{} UTC, the last eight-hour mark before the end of
+  the recorded window).}
+  \label{tab:schedule}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{live_clean_vs_recorded.pdf}
+  \caption{The same strategy over the same period, rebalanced at irregular moments
+  (recorded) and every seven days (clean). The paths separate at rebalances, when the
+  two books start holding different coins.}
+  \label{fig:schedule}
+\end{figure}
+
+Table~\ref{tab:schedule} and Figure~\ref{fig:schedule} show that the schedule moved the
+five-month result by \CleanGap{} points. Nothing about the strategy's rules changed;
+only the days on which it re-ranked the coins. Rebalancing on a different day selects
+different coins: at the end of the window only \LongOverlap{} of the \LongSize{} long
+positions (excluding BTC) are the same in the two books. In a book whose outcome is
+decided by which coins are held during a few large dispersion moves, that is enough to
+turn \CleanTotal\% into \LiveTotal\%. The sensitivity is itself evidence for the
+paper's thesis: a carry strategy would barely notice the rebalance day; a dispersion
+bet does. The diagnosis of the previous paragraphs is unaffected: on the clean schedule
+too, the price leg dominates and is unrelated to BTC.
+
 \paragraph{Is the loss significant?} Under i.i.d.\ returns the standard error of an
 annualised Sharpe ratio estimated over $T$ years is approximately
 $\sqrt{(1+\mathrm{SR}^2/2)/T}$ \citep{lo2002statistics}. With $T = \LiveDays/365$
 and the Bybit backtest Sharpe of \ByBaseSharpe{} as the null, the standard error is
-\LiveSE{} and the live Sharpe of \LiveSharpe{} gives $z = \LiveZ$. Five months of data
-cannot formally reject the backtest. The empirical distribution tells a less
-comfortable story. Of all 153-day windows in the backtests, \BnWinNegNet\% (Binance)
-and \ByWinNegNet\% (Bybit) lost money, but a loss of 15.3\% or more occurred in only
-\BnWinWorseLive\% of Binance windows and in none of the Bybit windows. Overlapping
-windows contain only a handful of independent observations, which is why the two views
-can coexist: the live result is not statistically decisive, but it lies at or beyond
-the edge of anything the backtest produced. Either the live period was unusually
-unlucky, or the backtest sample overstates the strategy. Section~\ref{sec:backtest}
-gives a reason to suspect the second.
+\LiveSE. The recorded Sharpe of \LiveSharpe{} gives $z = \LiveZ$; the clean schedule's
+\CleanSharpe{} gives $z = \CleanZ$. Neither rejects the backtest. The empirical
+distribution makes the role of the schedule sharper. Of all 153-day windows in the
+backtests, \BnWinNegNet\% (Binance) and \ByWinNegNet\% (Bybit) lost money. A loss of
+\LiveLoss\% or more, as recorded, occurred in only \BnWinWorseLive\% of Binance windows
+and in none of the Bybit windows. A result of \CleanTotal\% or worse, as on the clean
+schedule, occurred in \BnWinWorseClean\% and \ByWinWorseClean\% of windows. The
+recorded loss lies beyond anything the backtest produced; the strategy as specified had
+an ordinary bad five months. Most of what looked like a tail event was the execution
+schedule.
 
 \section{The same structure in backtests}\label{sec:backtest}
 
@@ -378,11 +447,12 @@ are designed to catch \citep{bailey2014deflated,harvey2016cross}.
 The book should be described as what it is: a cross-sectional dispersion strategy with
 a carry tailwind, not a carry strategy with residual risk. Its backtest Sharpe ratio of
 \ByBaseSharpe{} to \BnBaseSharpe{} is earned by a price leg with 25 to 30\% volatility,
-whose return is concentrated in a few episodes. The live loss is a tail outcome
-relative to the backtest, but with a strategy this volatile five months cannot settle
-whether that reflects bad luck or a backtest that overstates the edge. What the
-evidence does settle is that the strategy should not be run as a low-risk carry
-product.
+whose return is concentrated in a few episodes and so sensitive to which coins are
+held that the rebalance day alone moved five months of live results by \CleanGap{}
+points. On the intended schedule the live period was an ordinary bad stretch, not
+evidence against the backtest; five months cannot settle whether the edge is real.
+What the evidence does settle is that the strategy should not be run as a low-risk
+carry product, and that its live carry ran at about half the backtest rate.
 
 \subsection{Where the carry actually comes from}
 
@@ -411,11 +481,13 @@ around funding resets. I have not tested it here; it is the next experiment.
     no transaction costs at all; the backtests charge 8 bps on turnover. Real execution
     in the smaller coins would add costs and slippage, so the live figures are if
     anything optimistic.
-  \item \emph{Gaps.} The scheduled job only runs while the host machine is on. There
-    was \LiveGaps{} gap longer than a week (the longest \LiveLongestGap{} days), during
-    which the book was neither marked nor rebalanced. Marking across a gap is still
-    correct; the missed rebalances mean the live book was occasionally staler than
-    designed.
+  \item \emph{Execution schedule.} The recorded ledger only advanced while its host
+    machine was on (the longest gap was \LiveLongestGap{} days), so it rebalanced at
+    irregular moments. Section~\ref{sec:schedule} shows this moved the result by
+    \CleanGap{} points. The clean replay is the better estimate of the strategy as
+    specified, but it was reconstructed after the fact rather than recorded in real
+    time; no rule or parameter was changed to produce it. From 7 November 2026 the live
+    job replays missed steps itself.
   \item \emph{Fixed universe.} The 23 coins were chosen with hindsight, from coins that
     are still liquid today. That is survivorship bias in the backtest, which would
     flatter it.
@@ -426,7 +498,7 @@ around funding resets. I have not tested it here; it is the next experiment.
 \subsection{Ongoing}
 
 Variant C now runs live as a second, parallel shadow ledger from \LiveEnd{}, while the
-baseline continues unchanged as a control. Given Table~\ref{tab:variants}, the prior is
+baseline continues unchanged as a control; both now follow the clean schedule. Given Table~\ref{tab:variants}, the prior is
 lower volatility and lower drawdown, not higher return. The quantity to watch is the
 price-leg volatility per step relative to the baseline, which should become measurable
 within weeks, long before return differences mean anything.
@@ -436,14 +508,25 @@ within weeks, long before return differences mean anything.
 A funding-carry book on crypto perpetuals collects a real, stable, near-riskless cash
 flow and wraps it in a dispersion bet that is about thirty times more volatile. A BTC
 beta hedge neutralises the market well (live $R^2$ of \LiveRsqBtc\%) and is irrelevant
-to the dispersion, which drove a live loss of \LiveLoss\%. Better weights and a second
-factor lower the risk modestly but do not reliably raise the return. To harvest the
-carry, the book has to stop holding different coins on its two sides.
+to the dispersion, which decided the live result: \CleanTotal\% on the intended
+schedule, \LiveTotal\% as recorded, a gap that comes purely from rebalancing on
+different days. Better weights and a second factor lower the risk modestly but do not
+reliably raise the return. To harvest the carry, the book has to stop holding different
+coins on its two sides.
 
 \paragraph{Reproducibility.} Code, the shadow ledger and the script that generates
 every number and figure in this paper (\texttt{paper/make\_assets.py}) are in the
 \texttt{funding-carry-harvest} project of
 \url{https://github.com/noaRoblesLevy/Quant-Research}.
+
+\paragraph{Revision note (7 November 2026).} The first version reported only the
+recorded ledger and described its irregular schedule as a minor limitation. Replaying
+the period on the intended schedule showed that the schedule moved the result from
+\CleanTotal\% to \LiveTotal\%, that the recorded loss was a tail event mainly because
+of it, and that the live carry was about half the backtest rate rather than in line
+with it. Section~\ref{sec:schedule} was added and the abstract, the carry and
+significance discussion, the limitations and the conclusion were revised. The
+dispersion diagnosis is unchanged.
 
 \paragraph{Disclaimer.} This is research, not investment advice. No real capital was
 traded.

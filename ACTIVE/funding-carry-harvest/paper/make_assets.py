@@ -147,10 +147,17 @@ for venue, tag in (("binance", "Bn"), ("bybit", "By")):
           f"worst contributors:\n{(contrib.head(3)*100).round(1).to_string()}")
 
 # ------------------------------------------------------------------ live ledger
+# The paper analyses a frozen window: start of the live test up to PAPER_END, the last
+# step recorded before the paper was written. Later ledger rows are ignored so the
+# numbers do not drift as the forward test keeps running.
+PAPER_END = pd.Timestamp("2026-11-06T13:16:46.318581+00:00")
 led = pd.read_csv(DATA / "forward_ledger.csv", parse_dates=["time"])
-st = json.loads((DATA / "forward_state.json").read_text())
-start = pd.Timestamp(st["start"])
+st_full = json.loads((DATA / "forward_state.json").read_text())
+start = pd.Timestamp(st_full["start"])
 led["time"] = pd.to_datetime(led["time"], utc=True)
+led = led[led["time"] <= PAPER_END].reset_index(drop=True)
+st = dict(start=st_full["start"], cum_carry=float(led["cum_carry"].iloc[-1]),
+          cum_price=float(led["cum_price"].iloc[-1]), equity=float(led["equity"].iloc[-1]))
 t0 = start if start.tzinfo else start.tz_localize("UTC")
 days = (led["time"].iloc[-1] - t0).total_seconds() / 86400
 yrs = days / 365.0
@@ -248,7 +255,106 @@ N.update({
     "LiveSecondDate": worst["time"].iloc[1].strftime("%#d %B" if sys.platform == "win32" else "%-d %B"),
 })
 
+# ------------------------------------------------------------------ clean-schedule replay
+# The recorded ledger only advanced while the host PC was on, so rebalances happened at
+# irregular times. Replay the same window with the catch-up code in
+# forward_test_bybit.py: 8h funding grid, rebalance exactly every 7 days, data known at t.
+import io, contextlib, tempfile, warnings
+import forward_test_bybit as FT
+
+H1 = pd.Timedelta(hours=1)
+t0n = t0.tz_convert("UTC").tz_localize(None)
+g0 = FT.grid_after(t0n - pd.Timedelta(seconds=1), t0n + pd.Timedelta(hours=8))[0]
+tmp = Path(tempfile.mkdtemp())
+FT.set_variant("baseline", tmp)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", RuntimeWarning)
+    h0 = pd.DataFrame({s: FT.fetch_closes_range(s, g0 - 1002 * H1, g0 - H1) for s in FT.UNIVERSE})
+    f0 = {s: FT.fetch_funding_range(s, g0 - pd.Timedelta(days=3), g0) for s in FT.UNIVERSE}
+    iso0 = g0.tz_localize("UTC").isoformat()
+    FT.save_state(dict(start=iso0, last_run=iso0, last_rebalance=iso0, equity=1e5,
+                       positions=FT.weights_at(g0, h0, f0),
+                       last_price={s: float(h0[s].get(g0 - H1)) for s in FT.UNIVERSE},
+                       cum_carry=0.0, cum_price=0.0))
+    with contextlib.redirect_stdout(io.StringIO()):
+        FT.do_step(now=PAPER_END.tz_convert("UTC").tz_localize(None) + FT.SETTLE)
+clean = pd.read_csv(FT.LEDGER, parse_dates=["time"])
+clean_st = json.loads(FT.STATE.read_text())
+c_end = clean.iloc[-1]
+c_yrs = (clean["time"].iloc[-1] - clean["time"].iloc[0]).total_seconds() / 86400 / 365 \
+    + 8 / 24 / 365
+c_lr = np.log(clean["equity"] / clean["equity"].shift(1).fillna(1e5))
+c_sr = (c_lr.sum() / c_yrs) / np.sqrt((c_lr ** 2).sum() / c_yrs)
+c_z = (c_sr - exp_sr) / se
+c_total = c_end["equity"] / 1e5 - 1
+
+
+def legs(pos):
+    """Coins in the long leg, ignoring BTC (its weight mixes leg and hedge)."""
+    return {k for k, v in pos.items() if v > 0 and k != "BTCUSDT"}
+
+
+real_long, clean_long = legs(st_full["positions"]), legs(clean_st["positions"])
+reb_real = int(led["rebalanced"].astype(str).str.lower().eq("true").sum())
+
+
+def month_carry(df, m):
+    t = pd.to_datetime(df["time"], utc=True)
+    return float(df.loc[(t.dt.year == 2026) & (t.dt.month == m), "step_carry"].sum())
+
+
+# clean 8h steps vs BTC 8h returns (regular grid, so a clean regression)
+c_t = pd.to_datetime(clean["time"], utc=True)
+c_btc = [interval_ret(btc_px, a, b) for a, b in zip(c_t.shift(1).fillna(c_t.iloc[0] - pd.Timedelta(hours=8)), c_t)]
+cr = pd.DataFrame({"p": clean["step_price"], "b": c_btc}).dropna()
+_, c_r2 = ols(cr["p"].values, [cr["b"].values])
+
+# how often did 153-day backtest windows do at least as badly as the clean replay?
+for venue, tag in (("binance", "Bn"), ("bybit", "By")):
+    rn = np.log1p(books[venue]["baseline"]["net"]).rolling(459).sum().dropna()
+    N[f"{tag}WinWorseClean"] = pct((np.expm1(rn) <= c_total).mean(), 0)
+
+N.update({
+    "CleanSteps": f"{len(clean)}",
+    "CleanRebs": f"{int(clean['rebalanced'].sum())}",
+    "RealRebs": f"{reb_real}",
+    "CleanTotal": pct(c_total, 1),
+    "CleanLoss": pct(-c_total, 1),
+    "CleanCarry": pct(c_end["cum_carry"], 2, sign=True),
+    "CleanPrice": pct(c_end["cum_price"], 2, sign=True),
+    "CleanCarryAnn": pct(c_end["cum_carry"] / c_yrs, 1),
+    "CleanSharpe": num(c_sr),
+    "CleanZ": num(c_z),
+    "CleanPriceVol": pct(clean["step_price"].std() * np.sqrt(3 * 365), 0),
+    "CleanRsqBtc": pct(c_r2, 0),
+    "CleanGap": f"{(c_total - total) * 100:.1f}",
+    "CleanEnd": clean["time"].iloc[-1].strftime("%#d %B, %H:%M" if sys.platform == "win32" else "%-d %B, %H:%M"),
+    "OctCarryReal": pct(month_carry(led, 10), 2, sign=True),
+    "OctCarryClean": pct(month_carry(clean, 10), 2, sign=True),
+    "LongOverlap": f"{len(real_long & clean_long)}",
+    "LongSize": f"{len(real_long)}",
+})
+print(f"[clean replay] {len(clean)} steps, {int(clean['rebalanced'].sum())} rebalances, "
+      f"{c_total*100:+.1f}% (real {total*100:+.1f}%), carry {c_end['cum_carry']*100:+.2f}%, "
+      f"Sharpe {c_sr:.2f}, z {c_z:.2f}, R2 vs BTC {c_r2*100:.0f}%, "
+      f"long overlap {len(real_long & clean_long)}/{len(real_long)}")
+
+
 # ------------------------------------------------------------------ figures
+def fig_clean():
+    fig, ax = plt.subplots(figsize=(8, 3.6))
+    ax.plot(led["time"], led["equity"] / 1e3, color=AMBER, lw=1.6,
+            label=f"recorded ledger ({reb_real} rebalances, irregular)")
+    ax.plot(c_t, clean["equity"] / 1e3, color=AZURE, lw=1.6,
+            label=f"clean replay ({int(clean['rebalanced'].sum())} rebalances, every 7 days)")
+    ax.axhline(100, color=GREY, ls=":", lw=1)
+    ax.set_ylabel("equity ($k)")
+    ax.legend(loc="lower left")
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
 def fig_live():
     fig, ax = plt.subplots(2, 1, figsize=(8, 5.2), sharex=True,
                            gridspec_kw=dict(height_ratios=[1.1, 1]))
@@ -315,6 +421,7 @@ def fig_variants():
 
 
 save(fig_live, "live_ledger")
+save(fig_clean, "live_clean_vs_recorded")
 save(fig_legs, "backtest_legs")
 save(fig_scatter, "live_btc_scatter")
 save(fig_variants, "variants_equity")
