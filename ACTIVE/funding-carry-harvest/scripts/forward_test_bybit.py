@@ -106,11 +106,14 @@ def _ms(t: pd.Timestamp) -> int:
     return int(t.value // 1_000_000)
 
 
-def fetch_closes_range(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
-    """Hourly closes with OPEN time in [start, end], paging backward (any gap length)."""
+def fetch_closes_range(symbol: str, start: pd.Timestamp, end: pd.Timestamp,
+                       category: str = "linear") -> pd.Series:
+    """Hourly closes with OPEN time in [start, end], paging backward (any gap length).
+    category: "linear" (perpetuals, default) or "spot"."""
     rows, cursor, start_ms = {}, _ms(end), _ms(start)
     while cursor >= start_ms:
-        url = f"{BASE}/kline?category=linear&symbol={symbol}&interval=60&end={cursor}&limit=1000"
+        url = (f"{BASE}/kline?category={category}&symbol={symbol}&interval=60"
+               f"&end={cursor}&limit=1000")
         lst = _get(url)["result"]["list"]
         if not lst:
             break

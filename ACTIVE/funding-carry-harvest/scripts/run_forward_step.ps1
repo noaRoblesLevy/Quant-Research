@@ -25,3 +25,12 @@ $stepC = (& $py $fwd --step --variant c 2>&1 | Out-String)
 $dashC = (& $py $fwd --dashboard --variant c 2>&1 | Out-String)
 Add-Content -Path $logC -Encoding utf8 -Value "===== $ts (local) =====`n$stepC$dashC"
 Write-Output "[variant c] $($stepC.Trim())"
+
+# Third parallel shadow ledger: cash-and-carry (CC L=21 K=7), selected by the
+# pre-registered improvement study of 2026-11-07. Separate script, state and log.
+$cc     = Join-Path $proj "scripts\forward_test_cc.py"
+$logCC  = Join-Path $proj "data_cache\forward_log_cc.txt"
+$stepCC = (& $py $cc --step 2>&1 | Out-String)
+$dashCC = (& $py $cc --dashboard 2>&1 | Out-String)
+Add-Content -Path $logCC -Encoding utf8 -Value "===== $ts (local) =====`n$stepCC$dashCC"
+Write-Output "[cash-and-carry] $($stepCC.Trim())"
