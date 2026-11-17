@@ -10,23 +10,12 @@ $fwd  = Join-Path $proj "scripts\forward_test_bybit.py"
 $log  = Join-Path $proj "data_cache\forward_log.txt"
 $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-$step = (& $py $fwd --step 2>&1 | Out-String)
-$dash = (& $py $fwd --dashboard 2>&1 | Out-String)
+# FROZEN 2026-11-17 16:00 UTC: the cross-sectional ledgers (baseline and variant c)
+# no longer advance. Their state, ledgers and logs in data_cache/ are kept unchanged.
+# Reasons: docs/preregistration_2026-11-17.md, section "Separate decision". To print
+# their final reports:  python scripts/forward_test_bybit.py --report [--variant c]
 
-Add-Content -Path $log -Encoding utf8 -Value "===== $ts (local) =====`n$step$dash"
-
-# Echo the latest equity line to the console too (handy when run manually)
-Write-Output $step.Trim()
-
-# Parallel shadow ledger: variant c (inverse-vol + BTC/ETH hedge). Runs after the
-# baseline and logs separately, so a failure here never touches the baseline test.
-$logC  = Join-Path $proj "data_cache\forward_log_c.txt"
-$stepC = (& $py $fwd --step --variant c 2>&1 | Out-String)
-$dashC = (& $py $fwd --dashboard --variant c 2>&1 | Out-String)
-Add-Content -Path $logC -Encoding utf8 -Value "===== $ts (local) =====`n$stepC$dashC"
-Write-Output "[variant c] $($stepC.Trim())"
-
-# Third parallel shadow ledger: cash-and-carry (CC L=21 K=7), selected by the
+# Live shadow ledger: cash-and-carry (CC L=21 K=7), selected by the
 # pre-registered improvement study of 2026-11-07. Separate script, state and log.
 $cc     = Join-Path $proj "scripts\forward_test_cc.py"
 $logCC  = Join-Path $proj "data_cache\forward_log_cc.txt"
@@ -34,3 +23,11 @@ $stepCC = (& $py $cc --step 2>&1 | Out-String)
 $dashCC = (& $py $cc --dashboard 2>&1 | Out-String)
 Add-Content -Path $logCC -Encoding utf8 -Value "===== $ts (local) =====`n$stepCC$dashCC"
 Write-Output "[cash-and-carry] $($stepCC.Trim())"
+
+# Regime-filtered cash-and-carry (tau = 15% a year), selected by the pre-registered
+# study of 2026-11-17 (docs/preregistration_2026-11-17.md, rule R5). Own state and log.
+$logT  = Join-Path $proj "data_cache\forward_log_cc_tau15.txt"
+$stepT = (& $py $cc --step --tau 0.15 2>&1 | Out-String)
+$dashT = (& $py $cc --dashboard --tau 0.15 2>&1 | Out-String)
+Add-Content -Path $logT -Encoding utf8 -Value "===== $ts (local) =====`n$stepT$dashT"
+Write-Output "[cash-and-carry tau 15%] $($stepT.Trim())"

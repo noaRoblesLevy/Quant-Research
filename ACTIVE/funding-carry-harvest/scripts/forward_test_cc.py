@@ -19,6 +19,11 @@ rebalances. Returns are per unit of spot notional (spot used as collateral for t
     python scripts/forward_test_cc.py --step     # replay to now (scheduled every 8h)
     python scripts/forward_test_cc.py --report
     python scripts/forward_test_cc.py --dashboard
+
+    --tau 0.15   regime-filtered variant selected by the 2026-11-17 study
+                 (docs/preregistration_2026-11-17.md): a slot is filled only if the
+                 annualised 7-day mean funding exceeds tau. Own state/ledger files
+                 (suffix _cc_tau15); the tau = 0 ledger is unchanged.
 """
 from __future__ import annotations
 
@@ -47,16 +52,27 @@ STATE = ROOT / "data_cache" / "forward_state_cc.json"
 LEDGER = ROOT / "data_cache" / "forward_ledger_cc.csv"
 DASH_PNG = ROOT / "data_cache" / "forward_progress_cc.png"
 
+TAU = 0.0                          # annual entry hurdle; 0 = original CC (positive funding)
+PERIODS_PER_YEAR = 3 * 365
+
 # expectation from the study (Bybit Aug 2022 - May 2025); the 2026 holdout was -1.8%/yr
 EXPECT = dict(sharpe_8h=6.39, sharpe_monthly=2.89, ann_ret=0.082, holdout_ann_ret=-0.018)
 
 
+def suffix() -> str:
+    return "cc" if TAU == 0 else f"cc_tau{round(TAU * 100)}"
+
+
+def label() -> str:
+    return "CC L=21 K=7" + ("" if TAU == 0 else f" tau={TAU:.0%}")
+
+
 def set_state_dir(d: Path | None):
     global STATE, LEDGER, DASH_PNG
-    if d:
-        d = Path(d)
-        STATE, LEDGER, DASH_PNG = (d / "forward_state_cc.json", d / "forward_ledger_cc.csv",
-                                   d / "forward_progress_cc.png")
+    d = Path(d) if d else ROOT / "data_cache"
+    sx = suffix()
+    STATE, LEDGER, DASH_PNG = (d / f"forward_state_{sx}.json", d / f"forward_ledger_{sx}.csv",
+                               d / f"forward_progress_{sx}.png")
 
 
 def iso(t: pd.Timestamp) -> str:
@@ -91,7 +107,7 @@ def select_at(t: pd.Timestamp, funding: dict, perp: pd.DataFrame, spot: pd.DataF
     ok = [s for s in UNIVERSE if s in sig.index
           and np.isfinite(perp[s].get(t - H1, np.nan)) and np.isfinite(spot[s].get(t - H1, np.nan))]
     ranked = sorted(ok, key=lambda s: (-sig[s], UNIVERSE.index(s)))[:N_SLOTS]
-    return [s for s in ranked if sig[s] > 0]
+    return [s for s in ranked if sig[s] > TAU / PERIODS_PER_YEAR]
 
 
 def aggregate(st) -> tuple[dict, dict]:
@@ -193,7 +209,7 @@ def do_report():
     led = pd.read_csv(LEDGER)
     days = (pd.Timestamp(st["last_run"]) - pd.Timestamp(st["start"])).total_seconds() / 86400
     held = sum(1 for v in aggregate(st)[0].values() if v)
-    print(f"=== Forward test [cash-and-carry CC L=21 K=7] — {days:.1f} days live ===")
+    print(f"=== Forward test [cash-and-carry {label()}] - {days:.1f} days live ===")
     print(f"  equity      ${st['equity']:,.2f}   ({(st['equity']/1e5-1)*100:+.3f}%)")
     print(f"  cum carry   {st['cum_carry']*100:+.3f}%   cum price {st['cum_price']*100:+.3f}%   "
           f"cum cost {st['cum_cost']*100:.3f}%")
@@ -201,9 +217,14 @@ def do_report():
     if days > 7:
         print(f"  carry ann   {st['cum_carry']/days*365*100:+.1f}%/yr   "
               f"net ann {(st['equity']/1e5-1)/days*365*100:+.1f}%/yr")
-    print(f"\n  Study expectation (Bybit 2022-25): {EXPECT['ann_ret']*100:.1f}%/yr, monthly Sharpe "
-          f"{EXPECT['sharpe_monthly']}; 2026 holdout {EXPECT['holdout_ann_ret']*100:+.1f}%/yr.")
-    print("  -> Watch whether carry exceeds costs (~3%/yr) and a cash yield.")
+    if TAU == 0:
+        print(f"\n  Study expectation (Bybit 2022-25): {EXPECT['ann_ret']*100:.1f}%/yr, monthly Sharpe "
+              f"{EXPECT['sharpe_monthly']}; 2026 holdout {EXPECT['holdout_ann_ret']*100:+.1f}%/yr.")
+        print("  -> Watch whether carry exceeds costs (~3%/yr) and a cash yield.")
+    else:
+        print("\n  Study expectation (Bybit 2022-25): in the market ~15% of the time, excess over "
+              "cash ~3%/yr; 2026 holdout: fully in cash.")
+        print("  -> An empty book means cash. Watch whether filled periods beat costs + cash.")
 
 
 def do_dashboard():
@@ -217,7 +238,7 @@ def do_dashboard():
     fig, ax = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     ax[0].plot(led["time"], led["equity"], color="teal", lw=1.5)
     ax[0].axhline(100000, color="gray", ls=":", lw=1)
-    ax[0].set_title("Cash-and-carry forward test (CC L=21 K=7) - live shadow ledger")
+    ax[0].set_title(f"Cash-and-carry forward test ({label()}) - live shadow ledger")
     ax[0].set_ylabel("equity ($)"); ax[0].grid(alpha=0.3)
     for col, c in (("cum_carry", "green"), ("cum_price", "orange"), ("cum_cost", "red")):
         ax[1].plot(led["time"], led[col] * 100, color=c, label=col.replace("cum_", "cumulative "))
@@ -232,7 +253,9 @@ if __name__ == "__main__":
     for a in ("init", "step", "report", "dashboard"):
         ap.add_argument(f"--{a}", action="store_true")
     ap.add_argument("--state-dir", default=None, help="use this dir instead of data_cache/ (tests)")
+    ap.add_argument("--tau", type=float, default=0.0, help="annual entry hurdle, e.g. 0.15")
     a = ap.parse_args()
+    TAU = a.tau
     set_state_dir(a.state_dir)
     if a.init:        do_init()
     elif a.step:      do_step()
