@@ -46,10 +46,12 @@ class Config:
     kind: str = "XS0"
     L: int = 1
     K: int = 1
+    tau: float = 0.0      # CC only: annual hurdle on the smoothed funding (2026-11-17 study)
 
     @property
     def name(self) -> str:
-        return f"{self.kind} L={self.L} K={self.K}"
+        base = f"{self.kind} L={self.L} K={self.K}"
+        return base if self.tau == 0 else f"{base} tau={self.tau:.0%}"
 
 
 @dataclass
@@ -95,7 +97,7 @@ def _factor_hedge(w: np.ndarray, Rw: np.ndarray, fidx: list[int]) -> np.ndarray:
 
 # ----------------------------------------------------------------- construction
 def _weights(kind: str, i: int, sig: np.ndarray, R: np.ndarray, vol: np.ndarray,
-             spot_ok: np.ndarray | None, cols: list[str]):
+             spot_ok: np.ndarray | None, cols: list[str], tau: float = 0.0):
     """Return (perp weights, spot weights, hedge factor indices) at rebalance i,
     or None if the cross-section is too thin to trade."""
     N = len(cols)
@@ -148,7 +150,8 @@ def _weights(kind: str, i: int, sig: np.ndarray, R: np.ndarray, vol: np.ndarray,
         return w, s, [btc]
 
     if kind == "CC":
-        pos = [j for j in highs if sig[j] > 0]
+        hurdle = tau / PERIODS_PER_YEAR            # annual hurdle -> per 8h period
+        pos = [j for j in highs if sig[j] > hurdle]
         w[pos], s[pos] = -1.0 / N_EACH, 1.0 / N_EACH
         return w, s, []
 
@@ -167,7 +170,7 @@ def _simulate_one(panel: Panel, cfg: Config, offset: int, start: int) -> pd.Data
     spot_avail = (~np.isnan(panel.Rs.values)) if Rs is not None else None
 
     w = np.zeros(N); s = np.zeros(N); h = np.zeros(0); fidx: list[int] = []
-    out = np.zeros((T, 5))                     # carry, carry_long, carry_short, price, cost
+    out = np.zeros((T, 6))             # carry, carry_long, carry_short, price, cost, gross
     R0, F0 = np.nan_to_num(R), np.nan_to_num(Fd)
     Rs0 = np.nan_to_num(Rs) if Rs is not None else None
     for i in range(T):
@@ -180,9 +183,10 @@ def _simulate_one(panel: Panel, cfg: Config, offset: int, start: int) -> pd.Data
             hp = float(h @ R0[i, fidx]) if len(fidx) else 0.0
             hf = float(h @ F0[i, fidx]) if len(fidx) else 0.0
             out[i, :4] = (cl + cs - hf, cl, cs, price + hp)
+            out[i, 5] = float(s.sum())          # spot capital in use during period i
         if i >= start and (i - start - offset) % HOLD == 0:
             spot_ok = spot_avail[i] if spot_avail is not None else None   # known at t_i
-            res = _weights(cfg.kind, i, sig_all[i], R, vol_all[i], spot_ok, cols)
+            res = _weights(cfg.kind, i, sig_all[i], R, vol_all[i], spot_ok, cols, cfg.tau)
             if res is not None:
                 nw, ns, nf = res
                 cost = (np.abs(nw - w).sum() + np.abs(ns - s).sum()) / 2.0 * COST_BPS / 1e4
@@ -193,7 +197,7 @@ def _simulate_one(panel: Panel, cfg: Config, offset: int, start: int) -> pd.Data
                 out[i, 4] = cost
                 w, s, h, fidx = nw, ns, nh, nf
     df = pd.DataFrame(out, index=panel.R.index,
-                      columns=["carry", "carry_long", "carry_short", "price", "cost"])
+                      columns=["carry", "carry_long", "carry_short", "price", "cost", "gross"])
     df["net"] = df["carry"] + df["price"] - df["cost"]
     return df
 
