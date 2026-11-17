@@ -33,3 +33,6 @@ paper/*.aux
 paper/*.log
 paper/*.out
 paper/*.synctex.gz
+paper-regime/*.aux
+paper-regime/*.log
+paper-regime/*.out
